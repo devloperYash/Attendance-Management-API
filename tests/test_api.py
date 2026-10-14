@@ -274,3 +274,176 @@ def test_11_admin_explain():
     assert data["endpoint"] == "department_trend"
     assert data["collection"] == "employees"
     assert "explain" in data
+
+
+def test_12_shift_times_identical_fails_422():
+    payload = {
+        "emp_code": "EMP9999",
+        "name": "Invalid Shift Emp",
+        "email": "invalidshift@example.com",
+        "department": "Engineering",
+        "shift_start": "09:00",
+        "shift_end": "09:00",
+        "joined_on": "2026-01-01"
+    }
+    res = client.post("/employees", json=payload)
+    assert res.status_code == 422
+
+
+def test_13_punch_in_concurrency_race_condition():
+    import concurrent.futures
+    # Attempt 5 simultaneous punch-in requests for EMP0002 on July 15 (unpunched day)
+    # 2026-07-15 04:00:00 UTC = 1784088000000
+    payload = {
+        "emp_code": "EMP0002",
+        "punched_at": 1784088000000,
+        "status": "PRESENT"
+    }
+    status_codes = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+        futures = [executor.submit(client.post, "/attendance/punch-in", json=payload) for _ in range(5)]
+        for f in concurrent.futures.as_completed(futures):
+            status_codes.append(f.result().status_code)
+
+    assert status_codes.count(201) == 1
+    assert status_codes.count(409) == 4
+
+
+def test_14_rules_r1_overnight_and_r2_late_grace():
+    # Test R2 exact grace period values on a new day (2026-07-20)
+    # EMP0001 shift is 09:30 to 18:30 IST.
+    # 2026-07-20 09:40:00 IST = 04:10:00 UTC = 1784520600000 ms -> inside grace -> late_minutes = 0
+    res_exact_grace = client.post("/attendance/punch-in", json={
+        "emp_code": "EMP0001",
+        "punched_at": 1784520600000
+    })
+    assert res_exact_grace.status_code == 201
+    assert res_exact_grace.json()["late_minutes"] == 0
+
+    # 2026-07-21 09:40:01 IST = 04:10:01 UTC = 1784607001000 ms -> strictly > 10 min -> late_minutes = 10
+    res_late_1s = client.post("/attendance/punch-in", json={
+        "emp_code": "EMP0001",
+        "punched_at": 1784607001000
+    })
+    assert res_late_1s.status_code == 201
+    assert res_late_1s.json()["late_minutes"] == 10
+
+    # 2026-07-22 10:15:59 IST = 04:45:59 UTC = 1784695559000 ms -> floor(45m 59s) = 45 min
+    res_late_45m = client.post("/attendance/punch-in", json={
+        "emp_code": "EMP0001",
+        "punched_at": 1784695559000
+    })
+    assert res_late_45m.status_code == 201
+    assert res_late_45m.json()["late_minutes"] == 45
+
+    # Test R1 Overnight shift attribution:
+    # EMP0005 shift is 22:00 to 06:00 IST.
+    # Punch-in on 2026-07-09 at 02:00:00 IST (earlier than 06:00 shift end)
+    # 2026-07-09 02:00:00 IST = 2026-07-08 20:30:00 UTC = 1783542600000 ms.
+    # Must be attributed to attendance date 2026-07-08!
+    res_overnight = client.post("/attendance/punch-in", json={
+        "emp_code": "EMP0005",
+        "punched_at": 1783542600000
+    })
+    assert res_overnight.status_code == 201
+    assert res_overnight.json()["date"] == "2026-07-08"
+
+
+def test_15_rule_r3_overtime_threshold():
+    # EMP0001 shift ends at 18:30 IST. Punch-in at 09:30 IST on 2026-07-23 (1784779800000 ms)
+    client.post("/attendance/punch-in", json={
+        "emp_code": "EMP0001",
+        "punched_at": 1784779800000
+    })
+    # Punch out at 18:59:59 IST (29 min 59 sec after shift end) -> under 30 min -> overtime = 0
+    # 2026-07-23 18:59:59 IST = 13:29:59 UTC = 1784813399000 ms
+    res_ot_under = client.post("/attendance/punch-out", json={
+        "emp_code": "EMP0001",
+        "punched_at": 1784813399000
+    })
+    assert res_ot_under.status_code == 200
+    assert res_ot_under.json()["overtime_minutes"] == 0
+
+    # Next day 2026-07-24: punch-in at 09:30 IST (1784866200000 ms)
+    client.post("/attendance/punch-in", json={
+        "emp_code": "EMP0001",
+        "punched_at": 1784866200000
+    })
+    # Punch out at 19:00:00 IST (exactly 30 min after shift end) = 13:30:00 UTC = 1784899800000 ms -> overtime = 30
+    res_ot_30 = client.post("/attendance/punch-out", json={
+        "emp_code": "EMP0001",
+        "punched_at": 1784899800000
+    })
+    assert res_ot_30.status_code == 200
+    assert res_ot_30.json()["overtime_minutes"] == 30
+
+
+def test_16_rule_r7_weekend_records_handling():
+    # 2026-07-11 is a Saturday, 2026-07-12 is a Sunday.
+    # Punch in on Saturday 2026-07-11 with 15 min late.
+    # 2026-07-11 09:45:00 IST = 04:15:00 UTC = 1783743300000 ms
+    res_in = client.post("/attendance/punch-in", json={
+        "emp_code": "EMP0001",
+        "punched_at": 1783743300000
+    })
+    assert res_in.status_code == 201
+    assert res_in.json()["late_minutes"] == 15
+
+    # Check monthly summary for EMP0001:
+    # Present days in sample data was 2.0 (Jul 6, Jul 7).
+    # Since Jul 11 is Saturday, present_days must STILL be 2.0 (Mon-Fri only per R7).
+    # But late_count and total_late_minutes MUST include Saturday's record per R7!
+    res_monthly = client.get("/analytics/employees/EMP0001/monthly?month=2026-07")
+    assert res_monthly.status_code == 200
+    data = res_monthly.json()
+    assert data["present_days"] == 2.0
+    assert data["late_count"] == 1
+    assert data["total_late_minutes"] == 15
+
+
+def test_17_leaderboard_competition_ranking_ties_and_limit():
+    db = get_db()
+    # Add EMP0002 with identical 35 late minutes in July
+    from datetime import datetime, timezone
+    db.attendance_logs.insert_one({
+        "emp_code": "EMP0002",
+        "date": "2026-07-20",
+        "status": "PRESENT",
+        "punch_in": datetime(2026, 7, 20, 4, 35, tzinfo=timezone.utc),
+        "punch_out": None,
+        "work_hours": None,
+        "late_minutes": 35,
+        "overtime_minutes": 0,
+        "half_day": False,
+        "history": []
+    })
+
+    # Both EMP0002 and EMP0003 now have 35 late minutes.
+    # Query leaderboard with limit=1:
+    # Both tie for Rank 1. Since rank <= limit (1 <= 1), BOTH must be returned!
+    res = client.get("/analytics/leaderboard/late?month=2026-07&limit=1")
+    assert res.status_code == 200
+    items = res.json()["items"]
+    assert len(items) == 2
+    assert items[0]["rank"] == 1
+    assert items[1]["rank"] == 1
+    assert items[0]["emp_code"] == "EMP0002"  # Sorted by emp_code ascending on tie
+    assert items[1]["emp_code"] == "EMP0003"
+
+
+def test_18_admin_explain_all_endpoints_no_collscan():
+    # Verify that all 5 endpoints produce IXSCAN and zero COLLSCAN
+    endpoints_params = [
+        ("attendance_list", "/admin/explain/attendance_list?emp_code=EMP0001&date_from=2026-07-01"),
+        ("employee_monthly", "/admin/explain/employee_monthly?emp_code=EMP0001&month=2026-07"),
+        ("department_summary", "/admin/explain/department_summary?month=2026-07"),
+        ("late_leaderboard", "/admin/explain/late_leaderboard?month=2026-07&limit=10"),
+        ("department_trend", "/admin/explain/department_trend?department=Sales&from=2026-07-06&to=2026-07-08"),
+    ]
+
+    for name, url in endpoints_params:
+        res = client.get(url)
+        assert res.status_code == 200, f"Explain failed for {name}: {res.text}"
+        exp_text = str(res.json()["explain"])
+        assert "IXSCAN" in exp_text, f"{name} explain did not contain IXSCAN"
+        assert "COLLSCAN" not in exp_text, f"{name} explain contained COLLSCAN"

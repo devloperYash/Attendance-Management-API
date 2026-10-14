@@ -14,8 +14,8 @@ class PunchOutRequest(BaseModel):
 
 
 class AttendanceRegularize(BaseModel):
-    reason: str = Field(..., min_length=1, max_length=300)
-    regularized_by: str = Field(..., min_length=1, max_length=100)
+    reason: str = Field(..., min_length=5, max_length=200)
+    regularized_by: str = Field(..., min_length=1, max_length=50)
     status: Optional[str] = Field(None, pattern=r"^(PRESENT|WFH|ON_DUTY|ABSENT|LEAVE)$")
     punch_in: Optional[int] = None
     punch_out: Optional[int] = None

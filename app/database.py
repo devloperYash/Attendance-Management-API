@@ -32,8 +32,11 @@ def init_indexes() -> None:
     # 1. employees indexes
     db.employees.create_index([("emp_code", 1)], unique=True, name="uniq_emp_code")
     db.employees.create_index([("department", 1), ("emp_code", 1)], name="idx_dept_emp_code")
+    db.employees.create_index([("joined_on", 1)], name="idx_joined_on")
+    db.employees.create_index([("department", 1), ("joined_on", 1)], name="idx_dept_joined_on")
 
     # 2. attendance_logs indexes
     db.attendance_logs.create_index([("emp_code", 1), ("date", 1)], unique=True, name="uniq_emp_date")
     db.attendance_logs.create_index([("emp_code", 1), ("punch_in", -1)], name="idx_emp_punch_in_desc")
     db.attendance_logs.create_index([("date", -1), ("emp_code", 1)], name="idx_date_desc_emp_asc")
+    db.attendance_logs.create_index([("date", 1), ("late_minutes", 1)], name="idx_date_late_minutes")

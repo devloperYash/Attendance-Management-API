@@ -128,6 +128,14 @@ def explain_endpoint(
                 status_code=422,
                 detail="department, from, and to parameters are required for department_trend explain"
             )
+        try:
+            from datetime import date as dt_date
+            d_from = dt_date.fromisoformat(from_date)
+            d_to = dt_date.fromisoformat(to_date)
+        except ValueError:
+            raise HTTPException(status_code=422, detail="invalid date format")
+        if d_to < d_from:
+            raise HTTPException(status_code=422, detail="to cannot be earlier than from")
         collection = "employees"
         dept_emp_codes = [
             e["emp_code"]
